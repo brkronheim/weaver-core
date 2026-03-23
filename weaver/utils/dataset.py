@@ -297,7 +297,8 @@ class SimpleIterDataset(torch.utils.data.IterableDataset):
     def __init__(self, file_dict, data_config_file,
                  for_training=True, load_range_and_fraction=None, extra_selection=None,
                  fetch_by_files=False, fetch_step=0.01, file_fraction=1, remake_weights=False, up_sample=True,
-                 weight_scale=1, max_resample=10, async_load=True, infinity_mode=False, in_memory=False, name=''):
+                 weight_scale=1, max_resample=10, async_load=True, infinity_mode=False, in_memory=False,
+                 keep_observers=False, name=''):
         self._iters = {} if infinity_mode or in_memory else None
         _init_args = set(self.__dict__.keys())
         self._init_file_dict = file_dict
@@ -358,7 +359,13 @@ class SimpleIterDataset(torch.utils.data.IterableDataset):
                 _logger.info(
                     'Found file %s w/ auto-generated preprocessing information, will use that instead!' %
                     data_config_file)
-            self._data_config = DataConfig.load(data_config_file, load_observers=False, extra_selection=extra_selection)
+            self._data_config = DataConfig.load(
+                data_config_file,
+                load_observers=keep_observers,
+                extra_selection=extra_selection,
+            )
+            if keep_observers:
+                self._data_config.train_load_branches.update(self._data_config.observer_names)
         else:
             self._data_config = DataConfig.load(
                 data_config_file, load_reweight_info=False, extra_test_selection=extra_selection)
@@ -372,7 +379,10 @@ class SimpleIterDataset(torch.utils.data.IterableDataset):
 
     def __iter__(self):
         if self._iters is None:
-            kwargs = {k: copy.deepcopy(self.__dict__[k]) for k in self._init_args}
+            kwargs = {
+                k: (self.__dict__[k] if k == '_data_config' else copy.deepcopy(self.__dict__[k]))
+                for k in self._init_args
+            }
             return _SimpleIter(**kwargs)
         else:
             worker_info = torch.utils.data.get_worker_info()
@@ -380,6 +390,9 @@ class SimpleIterDataset(torch.utils.data.IterableDataset):
             try:
                 return self._iters[worker_id]
             except KeyError:
-                kwargs = {k: copy.deepcopy(self.__dict__[k]) for k in self._init_args}
+                kwargs = {
+                    k: (self.__dict__[k] if k == '_data_config' else copy.deepcopy(self.__dict__[k]))
+                    for k in self._init_args
+                }
                 self._iters[worker_id] = _SimpleIter(**kwargs)
                 return self._iters[worker_id]
