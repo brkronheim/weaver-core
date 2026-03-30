@@ -134,6 +134,7 @@ class _SimpleIter(object):
         self.table = None
         self.indices = []
         self.cursor = 0
+        self._needs_iteration_reset = False
 
         self._seed = None
         worker_info = torch.utils.data.get_worker_info()
@@ -204,6 +205,9 @@ class _SimpleIter(object):
             # case 2: running out of entries, `self.indices` is not empty
             while True:
                 if self._in_memory and len(self.indices) > 0:
+                    if not self._infinity_mode:
+                        self._needs_iteration_reset = True
+                        raise StopIteration
                     # only need to re-shuffle the indices, if this is not the first entry
                     if self._sampler_options['shuffle']:
                         np.random.shuffle(self.indices)
@@ -388,7 +392,18 @@ class SimpleIterDataset(torch.utils.data.IterableDataset):
             worker_info = torch.utils.data.get_worker_info()
             worker_id = worker_info.id if worker_info is not None else 0
             try:
-                return self._iters[worker_id]
+                iterator = self._iters[worker_id]
+                if self._in_memory and not iterator._infinity_mode:
+                    iterator._needs_iteration_reset = False
+                    iterator.cursor = 0
+                    if iterator._sampler_options['shuffle']:
+                        np.random.shuffle(iterator.indices)
+                elif self._in_memory and iterator._needs_iteration_reset:
+                    iterator._needs_iteration_reset = False
+                    iterator.cursor = 0
+                    if iterator._sampler_options['shuffle']:
+                        np.random.shuffle(iterator.indices)
+                return iterator
             except KeyError:
                 kwargs = {
                     k: (self.__dict__[k] if k == '_data_config' else copy.deepcopy(self.__dict__[k]))
