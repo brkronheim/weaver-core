@@ -232,8 +232,19 @@ class DataConfig(object):
         with open(fp) as f:
             _opts = yaml.safe_load(f)
             options = copy.deepcopy(_opts)
-        if not load_observers:
+        requested_observers = None
+        if isinstance(load_observers, (list, tuple, set, frozenset)):
+            requested_observers = tuple(str(name) for name in load_observers)
+        elif not load_observers:
             options['observers'] = None
+        if requested_observers is not None:
+            available_observers = tuple(_opts.get('observers') or ())
+            missing_observers = sorted(set(requested_observers) - set(available_observers))
+            if missing_observers:
+                raise ValueError(
+                    'Requested observers %s are not defined in %s' % (str(missing_observers), fp)
+                )
+            options['observers'] = [name for name in available_observers if name in requested_observers]
         if not load_reweight_info:
             options['weights'] = None
         if extra_selection:
