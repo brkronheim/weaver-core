@@ -198,6 +198,9 @@ class _SimpleIter(object):
         # print(self.ipos, self.cursor)
         if len(self.filelist) == 0:
             raise StopIteration
+        if self._batch_size is not None and self._batch_size > 0:
+            batch_indices = self._next_batch_indices()
+            return self.get_data_batch(batch_indices)
         try:
             i = self.indices[self.cursor]
         except IndexError:
@@ -233,6 +236,53 @@ class _SimpleIter(object):
             i = self.indices[self.cursor]
         self.cursor += 1
         return self.get_data(i)
+
+    def _load_next_table(self):
+        while True:
+            if self._in_memory and len(self.indices) > 0:
+                if not self._infinity_mode:
+                    self._needs_iteration_reset = True
+                    raise StopIteration
+                if self._sampler_options['shuffle']:
+                    np.random.shuffle(self.indices)
+                self.cursor = 0
+                return
+            if self.prefetch is None:
+                self.table = None
+                if self._async_load:
+                    self.executor.shutdown(wait=False)
+                raise StopIteration
+            if self._async_load:
+                self.table, self.indices = self.prefetch.result()
+            else:
+                self.table, self.indices = self.prefetch
+            self._try_get_next()
+            if len(self.indices) > 0:
+                self.cursor = 0
+                return
+
+    def _next_batch_indices(self):
+        while True:
+            if self.cursor >= len(self.indices):
+                self._load_next_table()
+            remaining = len(self.indices) - self.cursor
+            if remaining <= 0:
+                continue
+            if remaining >= self._batch_size:
+                batch_indices = self.indices[self.cursor:self.cursor + self._batch_size]
+                self.cursor += self._batch_size
+                return batch_indices
+            if self._sampler_options['training']:
+                if self._in_memory and self._infinity_mode:
+                    if self._sampler_options['shuffle']:
+                        np.random.shuffle(self.indices)
+                    self.cursor = 0
+                    continue
+                self.cursor = len(self.indices)
+                continue
+            batch_indices = self.indices[self.cursor:]
+            self.cursor = len(self.indices)
+            return batch_indices
 
     def _try_get_next(self, init=False):
         end_of_list = self.ipos >= len(self.filelist) if self._fetch_by_files else self.ipos >= self.load_range[1]
@@ -273,6 +323,19 @@ class _SimpleIter(object):
         Z = {k: copy.deepcopy(self.table[k][i]) for k in self._data_config.z_variables}
         return X, y, Z
 
+    def _slice_value(self, value, indices):
+        sliced = value[indices]
+        if isinstance(sliced, ak.Array):
+            return ak.to_numpy(sliced)
+        return sliced
+
+    def get_data_batch(self, indices):
+        # Batch-wise slicing avoids per-event deepcopy overhead in the Python hot path.
+        X = {k: self._slice_value(self.table['_' + k], indices) for k in self._data_config.input_names}
+        y = {k: self._slice_value(self.table[k], indices) for k in self._data_config.label_names}
+        Z = {k: self._slice_value(self.table[k], indices) for k in self._data_config.z_variables}
+        return X, y, Z
+
 
 class SimpleIterDataset(torch.utils.data.IterableDataset):
     r"""Base IterableDataset.
@@ -302,7 +365,7 @@ class SimpleIterDataset(torch.utils.data.IterableDataset):
                  for_training=True, load_range_and_fraction=None, extra_selection=None,
                  fetch_by_files=False, fetch_step=0.01, file_fraction=1, remake_weights=False, up_sample=True,
                  weight_scale=1, max_resample=10, async_load=True, infinity_mode=False, in_memory=False,
-                 keep_observers=False, name=''):
+                 keep_observers=False, batch_size=None, name=''):
         self._iters = {} if infinity_mode or in_memory else None
         _init_args = set(self.__dict__.keys())
         self._init_file_dict = file_dict
@@ -313,6 +376,7 @@ class SimpleIterDataset(torch.utils.data.IterableDataset):
         self._async_load = async_load
         self._infinity_mode = infinity_mode
         self._in_memory = in_memory
+        self._batch_size = int(batch_size) if batch_size else None
         self._name = name
 
         # ==== sampling parameters ====
